@@ -1,83 +1,152 @@
-const mysql = require('mysql2/promise');
-const { StatusCodes } = require('http-status-codes');
+const mysql = require("mysql2/promise");
+const { StatusCodes } = require("http-status-codes");
+const jwt = require("jsonwebtoken");
+const ensureAuthorization = require("../auth");
+const dotenv = require("dotenv");
+dotenv.config();
 
-const order = async (req, res) => {
-  const conn = await mysql.createConnection({
-    host: 'localhost',
-    user: 'root',
-    password: 'root',
-    database: 'Bookshop',
-    dateStrings: true,
-  });
-
-  const { items, delivery, totalQuantity, totalPrice, userId, firstBookTitle } =
-    req.body;
-
-  let sql =
-    'INSERT INTO deliveries (address, receiver, contact) VALUES (?, ?, ?)';
-  let values = [delivery.address, delivery.receiver, delivery.contact];
-  let [result] = await conn.execute(sql, values);
-  const deliveryId = result.insertId;
-
-  sql =
-    'INSERT INTO orders (book_title, total_quantity, total_price, user_id, delivery_id) VALUES (?, ?, ?, ?, ?)';
-  values = [firstBookTitle, totalQuantity, totalPrice, userId, deliveryId];
-  [result] = await conn.execute(sql, values);
-  const orderId = result.insertId;
-
-  sql = 'SELECT book_id, quantity FROM cartItems WHERE id IN (?)';
-  [orderItems, fields] = await conn.query(sql, [items]);
-
-  sql = 'INSERT INTO orderedBooks (order_id, book_id, quantity) VALUES ?';
-  values = [];
-  orderItems.forEach((item) => {
-    console.log(item);
-    values.push([orderId, item.book_id, item.quantity]);
-  });
-
-  result = await conn.query(sql, [values]);
-
-  result = await deleteCartItems(conn, items);
-
-  return res.status(StatusCodes.CREATED).json(result[0]);
+const dbConfig = {
+  host: process.env.DB_HOST,
+  user: process.env.DB_USER,
+  password: process.env.DB_PASSWORD,
+  database: process.env.DB_NAME,
+  dateStrings: true,
 };
 
-const deleteCartItems = async (conn, items) => {
-  let sql = `DELETE FROM cartItems WHERE id IN (?)`;
+const unauthorized = (res, auth) =>
+  res.status(StatusCodes.UNAUTHORIZED).json({
+    message:
+      auth instanceof jwt.TokenExpiredError
+        ? "로그인 세션이 만료되었습니다."
+        : "로그인이 필요합니다.",
+  });
 
-  let result = await conn.query(sql, [items]);
+const order = async (req, res) => {
+  const auth = ensureAuthorization(req);
+  if (auth instanceof jwt.JsonWebTokenError) return unauthorized(res, auth);
+
+  const { items, delivery, totalQuantity, totalPrice, firstBookTitle } =
+    req.body;
+
+  if (!Array.isArray(items) || items.length === 0 || !delivery) {
+    return res
+      .status(StatusCodes.BAD_REQUEST)
+      .json({ message: "주문할 상품과 배송 정보가 필요합니다." });
+  }
+
+  let conn;
+  try {
+    conn = await mysql.createConnection(dbConfig);
+    await conn.beginTransaction();
+
+    const [deliveryResult] = await conn.execute(
+      "INSERT INTO deliveries (address, receiver, contact) VALUES (?, ?, ?)",
+      [delivery.address, delivery.receiver, delivery.contact],
+    );
+    const deliveryId = deliveryResult.insertId;
+
+    const [orderResult] = await conn.execute(
+      "INSERT INTO orders (book_title, total_quantity, total_price, user_id, delivery_id) VALUES (?, ?, ?, ?, ?)",
+      [firstBookTitle, totalQuantity, totalPrice, auth.id, deliveryId],
+    );
+    const orderId = orderResult.insertId;
+
+    const [orderItems] = await conn.query(
+      "SELECT book_id, quantity FROM cartItems WHERE id IN (?) AND user_id = ?",
+      [items, auth.id],
+    );
+
+    if (orderItems.length === 0) {
+      await conn.rollback();
+      return res
+        .status(StatusCodes.BAD_REQUEST)
+        .json({ message: "장바구니에 주문할 상품이 없습니다." });
+    }
+
+    const values = orderItems.map((item) => [
+      orderId,
+      item.book_id,
+      item.quantity,
+    ]);
+    await conn.query(
+      "INSERT INTO orderedBooks (order_id, book_id, quantity) VALUES ?",
+      [values],
+    );
+
+    await deleteCartItems(conn, items, auth.id);
+
+    await conn.commit();
+    return res.status(StatusCodes.CREATED).json({ orderId });
+  } catch (err) {
+    console.log(err);
+    if (conn) await conn.rollback();
+    return res.status(StatusCodes.BAD_REQUEST).end();
+  } finally {
+    if (conn) await conn.end();
+  }
+};
+
+const deleteCartItems = async (conn, items, userId) => {
+  const [result] = await conn.query(
+    "DELETE FROM cartItems WHERE id IN (?) AND user_id = ?",
+    [items, userId],
+  );
   return result;
 };
 
 const getOrders = async (req, res) => {
-  const conn = await mysql.createConnection({
-    host: 'localhost',
-    user: 'root',
-    password: 'root',
-    database: 'Bookshop',
-    dateStrings: true,
-  });
+  const auth = ensureAuthorization(req);
+  if (auth instanceof jwt.JsonWebTokenError) return unauthorized(res, auth);
 
-  let sql =
-    'SELECT orders.id, created_at, address, receiver, contact, book_title, total_quantity, total_price FROM orders LEFT JOIN deliveries ON orders.delivery_id = deliveries.id';
-  let [rows, fields] = await conn.query(sql);
-  return res.status(StatusCodes.OK).json(rows);
+  let conn;
+  try {
+    conn = await mysql.createConnection(dbConfig);
+
+    // getOrders
+    const sql = `SELECT orders.id,
+                    orders.created_at   AS createdAt,
+                    address, receiver, contact,
+                    book_title          AS bookTitle,
+                    total_quantity      AS totalQuantity,
+                    total_price         AS totalPrice
+             FROM orders
+             LEFT JOIN deliveries ON orders.delivery_id = deliveries.id
+             WHERE orders.user_id = ?
+             ORDER BY orders.created_at DESC`;
+    const [rows] = await conn.query(sql, [auth.id]);
+    return res.status(StatusCodes.OK).json(rows);
+  } catch (err) {
+    console.log(err);
+    return res.status(StatusCodes.BAD_REQUEST).end();
+  } finally {
+    if (conn) await conn.end();
+  }
 };
 
 const getOrderDetail = async (req, res) => {
-  const id = parseInt(req.params.id);
-  const conn = await mysql.createConnection({
-    host: 'localhost',
-    user: 'root',
-    password: 'root',
-    database: 'Bookshop',
-    dateStrings: true,
-  });
+  const auth = ensureAuthorization(req);
+  if (auth instanceof jwt.JsonWebTokenError) return unauthorized(res, auth);
 
-  let sql =
-    'SELECT book_id, title, author, price, quantity FROM orderedBooks LEFT JOIN books ON orderedBooks.book_id = books.id WHERE order_id = ?';
-  let [rows, fields] = await conn.query(sql, id);
-  return res.status(StatusCodes.OK).json(rows);
+  const orderId = parseInt(req.params.id);
+
+  let conn;
+  try {
+    conn = await mysql.createConnection(dbConfig);
+
+    const sql = `SELECT orderedBooks.book_id AS bookId,
+                    title, author, price, quantity, img
+             FROM orderedBooks
+             LEFT JOIN books ON orderedBooks.book_id = books.id
+             JOIN orders ON orderedBooks.order_id = orders.id
+             WHERE orderedBooks.order_id = ? AND orders.user_id = ?`;
+    const [rows] = await conn.query(sql, [orderId, auth.id]);
+    return res.status(StatusCodes.OK).json(rows);
+  } catch (err) {
+    console.log(err);
+    return res.status(StatusCodes.BAD_REQUEST).end();
+  } finally {
+    if (conn) await conn.end();
+  }
 };
 
 module.exports = {

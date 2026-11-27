@@ -5,16 +5,16 @@ Express.js + MySQL(MariaDB) 기반의 REST API 서버로, 프론트엔드와 연
 
 ## 🛠 기술 스택
 
-| 분류 | 기술 |
-|------|------|
-| Runtime | Node.js |
-| Framework | Express.js |
-| 데이터베이스 | MySQL / MariaDB (mysql2, 주문 API는 `mysql2/promise` + 트랜잭션) |
-| 인증 | JWT (jsonwebtoken) |
-| 비밀번호 암호화 | Node.js `crypto` (pbkdf2 + salt) |
-| CORS | cors |
-| 환경 변수 | dotenv |
-| HTTP 상태 코드 | http-status-codes |
+| 분류            | 기술                                                             |
+| --------------- | ---------------------------------------------------------------- |
+| Runtime         | Node.js                                                          |
+| Framework       | Express.js                                                       |
+| 데이터베이스    | MySQL / MariaDB (mysql2, 주문 API는 `mysql2/promise` + 트랜잭션) |
+| 인증            | JWT (jsonwebtoken)                                               |
+| 비밀번호 암호화 | Node.js `crypto` (pbkdf2 + salt)                                 |
+| CORS            | cors                                                             |
+| 환경 변수       | dotenv                                                           |
+| HTTP 상태 코드  | http-status-codes                                                |
 
 ## 📁 프로젝트 구조
 
@@ -40,66 +40,155 @@ Express.js + MySQL(MariaDB) 기반의 REST API 서버로, 프론트엔드와 연
 └── package.json
 ```
 
+## ERD
+
+```mermaid
+erDiagram
+    users ||--o{ likes : "좋아요"
+    users ||--o{ cartItems : "장바구니"
+    users ||--o{ orders : "주문"
+    categories ||--o{ books : "분류"
+    books ||--o{ likes : "좋아요 대상"
+    books ||--o{ cartItems : "담긴 도서"
+    books ||--o{ orderedBooks : "주문된 도서"
+    orders ||--|{ orderedBooks : "주문 상세"
+    deliveries ||--|| orders : "배송지"
+
+    users {
+        int id PK
+        varchar email UK
+        varchar password
+        varchar salt
+    }
+
+    categories {
+        int id PK
+        varchar name
+    }
+
+    books {
+        int id PK
+        varchar title
+        int img
+        int category_id FK
+        varchar form
+        varchar isbn UK
+        text summary
+        text detail
+        varchar author
+        int pages
+        text contents
+        int price
+        date pub_date
+    }
+
+    likes {
+        int user_id PK, FK
+        int liked_book_id PK, FK
+    }
+
+    cartItems {
+        int id PK
+        int user_id FK
+        int book_id FK
+        int quantity
+    }
+
+    deliveries {
+        int id PK
+        varchar address
+        varchar receiver
+        varchar contact
+    }
+
+    orders {
+        int id PK
+        int user_id FK
+        int delivery_id FK
+        int total_price
+        timestamp created_at
+        varchar book_title
+        int total_quantity
+    }
+
+    orderedBooks {
+        int order_id PK, FK
+        int book_id PK, FK
+        int quantity
+    }
+```
+
+| 테이블         | 설명                                                     |
+| -------------- | -------------------------------------------------------- |
+| `users`        | 회원 (비밀번호는 salt와 함께 해시로 저장)                |
+| `categories`   | 도서 카테고리                                            |
+| `books`        | 도서 정보                                                |
+| `likes`        | 회원-도서 좋아요 (`user_id` + `liked_book_id` 중복 불가) |
+| `cartItems`    | 장바구니 항목                                            |
+| `deliveries`   | 주문별 배송 정보                                         |
+| `orders`       | 주문 (대표 도서명, 총 수량, 총 금액)                     |
+| `orderedBooks` | 주문에 포함된 도서와 수량                                |
+
 ## 🔌 API 엔드포인트
 
 🔒 표시는 로그인(JWT)이 필요한 API입니다.
 
 ### 회원 `/users`
 
-| 메서드 | 경로 | 설명 | 요청 Body |
-|--------|------|------|-----------|
-| POST | `/users/join` | 회원가입 (중복 이메일 시 409) | `email`, `password` |
-| POST | `/users/login` | 로그인, JWT 발급 (유효기간 1시간) | `email`, `password` |
-| POST | `/users/reset` | 비밀번호 초기화 요청 (가입 이메일 확인) | `email` |
-| PUT | `/users/reset` | 비밀번호 초기화 | `email`, `password` |
+| 메서드 | 경로           | 설명                                    | 요청 Body           |
+| ------ | -------------- | --------------------------------------- | ------------------- |
+| POST   | `/users/join`  | 회원가입 (중복 이메일 시 409)           | `email`, `password` |
+| POST   | `/users/login` | 로그인, JWT 발급 (유효기간 1시간)       | `email`, `password` |
+| POST   | `/users/reset` | 비밀번호 초기화 요청 (가입 이메일 확인) | `email`             |
+| PUT    | `/users/reset` | 비밀번호 초기화                         | `email`, `password` |
 
 ### 도서 `/books`
 
-| 메서드 | 경로 | 설명 |
-|--------|------|------|
-| GET | `/books` | 도서 목록 조회 (카테고리·신간 필터, 페이지네이션) |
-| GET | `/books/best` | 베스트 도서 조회 (좋아요 순 상위 10권) |
-| GET | `/books/:id` | 도서 상세 조회 (토큰이 있으면 본인 좋아요 여부 `liked` 포함) |
+| 메서드 | 경로          | 설명                                                         |
+| ------ | ------------- | ------------------------------------------------------------ |
+| GET    | `/books`      | 도서 목록 조회 (카테고리·신간 필터, 페이지네이션)            |
+| GET    | `/books/best` | 베스트 도서 조회 (좋아요 순 상위 10권)                       |
+| GET    | `/books/:id`  | 도서 상세 조회 (토큰이 있으면 본인 좋아요 여부 `liked` 포함) |
 
 `GET /books` 쿼리 파라미터
 
-| 이름 | 설명 | 기본값 |
-|------|------|--------|
-| `categoryId` (또는 `category_id`) | 카테고리 ID로 필터 | - |
-| `news` | `true`이면 최근 1개월 내 출간 도서만 조회 | - |
-| `limit` | 페이지당 도서 수 | `8` |
-| `currentPage` | 현재 페이지 | `1` |
+| 이름                              | 설명                                      | 기본값 |
+| --------------------------------- | ----------------------------------------- | ------ |
+| `categoryId` (또는 `category_id`) | 카테고리 ID로 필터                        | -      |
+| `news`                            | `true`이면 최근 1개월 내 출간 도서만 조회 | -      |
+| `limit`                           | 페이지당 도서 수                          | `8`    |
+| `currentPage`                     | 현재 페이지                               | `1`    |
 
 응답 형식: `{ books: [...], pagination: { currentPage, totalCount } }`
 
 ### 카테고리 `/categories`
 
-| 메서드 | 경로 | 설명 |
-|--------|------|------|
-| GET | `/categories` | 카테고리 전체 목록 조회 |
+| 메서드 | 경로          | 설명                    |
+| ------ | ------------- | ----------------------- |
+| GET    | `/categories` | 카테고리 전체 목록 조회 |
 
 ### 좋아요 `/likes` 🔒
 
-| 메서드 | 경로 | 설명 |
-|--------|------|------|
-| POST | `/likes/:id` | 도서 좋아요 추가 (이미 좋아요한 경우 409) |
-| DELETE | `/likes/:id` | 도서 좋아요 취소 |
+| 메서드 | 경로         | 설명                                      |
+| ------ | ------------ | ----------------------------------------- |
+| POST   | `/likes/:id` | 도서 좋아요 추가 (이미 좋아요한 경우 409) |
+| DELETE | `/likes/:id` | 도서 좋아요 취소                          |
 
 ### 장바구니 `/carts` 🔒
 
-| 메서드 | 경로 | 설명 | 요청 Body |
-|--------|------|------|-----------|
-| POST | `/carts` | 장바구니 담기 | `bookId`, `quantity` |
-| GET | `/carts` | 장바구니 조회 / 주문서 조회 | `selected` (선택한 장바구니 ID 배열, 생략 시 전체 조회) |
-| DELETE | `/carts/:id` | 장바구니 항목 삭제 | - |
+| 메서드 | 경로         | 설명                        | 요청 Body                                               |
+| ------ | ------------ | --------------------------- | ------------------------------------------------------- |
+| POST   | `/carts`     | 장바구니 담기               | `bookId`, `quantity`                                    |
+| GET    | `/carts`     | 장바구니 조회 / 주문서 조회 | `selected` (선택한 장바구니 ID 배열, 생략 시 전체 조회) |
+| DELETE | `/carts/:id` | 장바구니 항목 삭제          | -                                                       |
 
 ### 주문 `/orders` 🔒
 
-| 메서드 | 경로 | 설명 |
-|--------|------|------|
-| POST | `/orders` | 주문하기 (배송 정보 저장 → 주문 생성 → 주문 도서 저장 → 장바구니 삭제를 하나의 트랜잭션으로 처리) |
-| GET | `/orders` | 주문 목록 조회 (최신순) |
-| GET | `/orders/:id` | 주문 상세 조회 (주문한 도서 목록) |
+| 메서드 | 경로          | 설명                                                                                              |
+| ------ | ------------- | ------------------------------------------------------------------------------------------------- |
+| POST   | `/orders`     | 주문하기 (배송 정보 저장 → 주문 생성 → 주문 도서 저장 → 장바구니 삭제를 하나의 트랜잭션으로 처리) |
+| GET    | `/orders`     | 주문 목록 조회 (최신순)                                                                           |
+| GET    | `/orders/:id` | 주문 상세 조회 (주문한 도서 목록)                                                                 |
 
 `POST /orders` 요청 Body 예시
 
